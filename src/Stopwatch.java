@@ -47,6 +47,14 @@ public class Stopwatch implements AutoCloseable {
         }
     }
 
+    public Long getTimeSinceStored(Short key) {
+        Long time = times.get(key);
+        if(time == null)
+            return null;
+        else
+            return System.nanoTime() - time;
+    }
+
     public void enable() throws IOException {
         this.enable = true;
         if(runName.equals("blank"))

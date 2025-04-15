@@ -14,10 +14,15 @@ import static java.util.Map.entry;
 public class TFTPSocket implements AutoCloseable {
 
     private static final int DEFAULT_WINDOW_SIZE = 8;
+
+    //In miliseconds
     private static final int DEFAULT_TIMEOUT = 5500;
 
     private static final short NO_BLOCK_NUM = -1;
-    private  static final int WAIT_BEFORE_RESEND = 1000;
+
+    //In nanoseconds
+    private  static final long WAIT_BEFORE_RESEND = 1000000000L; //2000 miliseconds
+    private  static final long WAIT_BEFORE_TERMINATE = WAIT_BEFORE_RESEND*3;
     /*Error Codes
 
 Implemented    Value     Meaning
@@ -272,12 +277,15 @@ Implemented    Value     Meaning
         receiveOpen = true;
         Thread receiveLoop = new Thread(() -> {
             while(receiveOpen) {
-                try {
-                    TFTPPacket newPacket = receive();
-                    receiveList.add(newPacket);
-                } catch (IOException e) {
-                    break;
-                }
+                    try {
+                        TFTPPacket newPacket = receive();
+                        synchronized (this) {
+                            receiveList.add(newPacket);
+                        }
+                        //System.out.println(receiveList);
+                    } catch (IOException e) {
+                        break;
+                    }
 
             }
             return;
@@ -329,21 +337,16 @@ Implemented    Value     Meaning
                     if(dataPacket.getBlockNum() <= currBlockNum) {
                         send(acknowledgeDataPacket(dataPacket), request.getAddress(), request.getPort());
 
-                        synchronized (this) {
-                            try {
-                                receiveList.remove(0);
-                            } catch (IndexOutOfBoundsException e) {
-                                //Should never occur
-                                receiveOpen = false;
-                                throw new RuntimeException(e);
-                            }
-                        }
-
                     } else {
                         //Packets dropped or out of order, throw away the packet queue
-                        synchronized (this) {
-                            receiveList.clear();
-                        }
+
+                            //It is questionable if this is the right call here
+                            //
+                            //receiveList.clear();
+                            System.out.println("Packet '"  + dataPacket.getBlockNum() +"' dropped or out of order (expected " + currBlockNum + ")");
+                            //continue;
+                            break;
+
                     }
 
                     if(dataPacket.getBlockNum() == currBlockNum) {
@@ -358,6 +361,8 @@ Implemented    Value     Meaning
                         }
                     }
 
+                    //If there is a duplicate packet, currBlockNum is not incremented and the packet is removed.
+
                     break;
 
                 //If oackack was not received previously, ack it again
@@ -370,14 +375,7 @@ Implemented    Value     Meaning
                     //If timeout, ignore it and busy wait.
                     if(receive == TIME_OUT_ERROR) {
                         //System.out.println("Timeout ignored");
-                        try {
-                            receiveList.remove(0);
-                        } catch (IndexOutOfBoundsException e) {
-                            //Should never occur
-                            receiveOpen = false;
-                            throw new RuntimeException(e);
-                        }
-                        continue;
+                        break;
                     }
                     receiveOpen = false;
                     throw new TFTPException((TFTPErrorPacket)receive);
@@ -388,6 +386,21 @@ Implemented    Value     Meaning
                     send(ILLEGAL_OPERATION, request.getAddress(), request.getPort());
                     receiveOpen = false;
                     throw new TFTPException(ILLEGAL_OPERATION);
+            }
+            synchronized (this) {
+                try {
+                    //This predicate should always evaluate to true. For some unknown reason, it is possible for receiveList
+                    //System.out.println(((TFTPDataPacket)receiveList.get(0)).getBlockNum() == ((TFTPDataPacket)receive).getBlockNum());
+                    ////if(receiveList.size() == 0) {
+                   //     System.out.println("FUCK");
+                    //}
+
+                    receiveList.remove(0);
+                } catch (IndexOutOfBoundsException e) {
+                    //Should never occur
+                    receiveOpen = false;
+                    throw new RuntimeException(e);
+                }
             }
             System.out.println("reading: " + Integer.toString(dataLoc) + "/" + Integer.toString(totalDataReceived));
         }
@@ -462,12 +475,15 @@ Implemented    Value     Meaning
         //Activate constant receive for acknowledgements
         Thread receiveLoop = new Thread(() -> {
             while(receiveOpen) {
-                try {
-                    TFTPPacket newPacket = receive();
-                    receiveList.add(newPacket);
-                } catch (IOException e) {
-                    break;
-                }
+                    try {
+                        TFTPPacket newPacket = receive();
+                        synchronized (this) {
+                            receiveList.add(newPacket);
+                        }
+                    } catch (IOException e) {
+                        break;
+                    }
+
             }
             return;
 
@@ -476,28 +492,43 @@ Implemented    Value     Meaning
 
         //Send data, resend window if data not acknowledged
         boolean allAcknowledged = false;
-        long initTime = 0;
         while(!allAcknowledged) {
             sendWindow.resetPosition();
-            long time = System.currentTimeMillis();
             //Send all packets in the window
             //Only do if timeout
-            if(initTime + WAIT_BEFORE_RESEND < time) {
-                initTime = System.currentTimeMillis();
-                while (!sendWindow.isEndOfWindow()) {
-                    if (sendWindow.getState() != SlidingWindow.AckState.ACKED) {
-                        TFTPPacket item = sendWindow.getItem();
-                        //if (item == null) {
-                        //    System.out.println("Sending null item.");
-                        //}
+
+            boolean timeOut = false;
+            while (!sendWindow.isEndOfWindow()) {
+                if (sendWindow.getState() != SlidingWindow.AckState.ACKED) {
+                    TFTPPacket item = sendWindow.getItem();
+                    //if (item == null) {
+                    //    System.out.println("Sending null item.");
+                    //}
+                    if(item.getOpcode() == TFTPPacket.Opcode.DATA) {
+                        Long lifeTime = null;
+
+                        lifeTime = timer.getTimeSinceStored(((TFTPDataPacket) item).getBlockNum());
+                        if (lifeTime != null && WAIT_BEFORE_TERMINATE < lifeTime) {
+                            return; //timeout
+                        }
+
+                        //If an item was sent but the time returned null, something is wrong. Break;
+                        if(!timeOut && lifeTime == null && sendWindow.getState() == SlidingWindow.AckState.SENT)
+                            break;
+
+                        //Once the timeout occurs or the first not sent packet is found, send it and all packets after it
+                        timeOut = timeOut || (lifeTime == null || WAIT_BEFORE_RESEND < lifeTime);
+                        if (timeOut) {
+                            send(sendWindow.getItem(), lastClientAddr, lastClientPort);
+                            sendWindow.setState(SlidingWindow.AckState.SENT);
+                        }
+                    } else {
                         send(sendWindow.getItem(), lastClientAddr, lastClientPort);
                         sendWindow.setState(SlidingWindow.AckState.SENT);
                     }
-                    sendWindow.nextPosition();
                 }
+                sendWindow.nextPosition();
             }
-
-
 
 
             //Get first packet from buffer if it exists
@@ -571,6 +602,7 @@ Implemented    Value     Meaning
                             }
 
                             //if the window moved, send all the not sent packets immediately
+                            /*
                             while(!sendWindow.isEndOfWindow()){
                                 if(sendWindow.getState() == SlidingWindow.AckState.NOT_SENT) {
                                     send(sendWindow.getItem(), lastClientAddr, lastClientPort);
@@ -578,6 +610,7 @@ Implemented    Value     Meaning
                                 }
                                 sendWindow.nextPosition();
                             }
+                             */
                         }
 
                         //Finished sending data
@@ -601,7 +634,7 @@ Implemented    Value     Meaning
                                 }
                             }
                             //System.out.println("Timeout ignored");
-                            continue;
+                            break;
                         }
                         receiveOpen = false;
                         throw new TFTPException((TFTPErrorPacket) receive);
@@ -679,6 +712,7 @@ Implemented    Value     Meaning
             }
             case DATA -> {
                 key = ((TFTPDataPacket)packet).getBlockNum();
+                System.out.println("Sending Data packet with block: " + key);
             }
             case ERROR -> {
                 datagramSocket.send(wrappedPacket);
@@ -693,15 +727,15 @@ Implemented    Value     Meaning
     }
 
     private TFTPPacket receive() throws IOException {
-        //Roll to drop packet. If dropChance > 0, there is a chance to randomly drop the packet
-        if(rollToDrop()) {
-            return TIME_OUT_ERROR;
-        }
-
         byte[] buffer = new byte[TFTPPacket.MAX_PACKET_SIZE];
         try {
             DatagramPacket wrappedPacket = new DatagramPacket(buffer, TFTPPacket.MAX_PACKET_SIZE);
             datagramSocket.receive(wrappedPacket);
+
+            //Roll to drop packet. If dropChance > 0, there is a chance to randomly drop the packet
+            if(rollToDrop()) {
+                return TIME_OUT_ERROR;
+            }
 
             byte[] rawReceive = Arrays.copyOf(buffer, wrappedPacket.getLength());
 

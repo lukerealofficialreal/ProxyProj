@@ -49,14 +49,17 @@ public class ProxyClient extends Thread{
         Scanner scanner = new Scanner(System.in);
 
         System.out.print("Enter server address: ");
-        /* //Test with localhost
+         //Test with localhost
+        /*
         InetAddress serverAddr = null;
         try {
             serverAddr = InetAddress.getByName("localhost");
         } catch (UnknownHostException e) {
-            throw new RuntimeException(e);
+            System.out.println("Unknown host.");
+            System.exit(1);
         }
-         */
+        */
+
         InetAddress serverAddr = null;
         try {
             serverAddr = InetAddress.getByName(scanner.nextLine());

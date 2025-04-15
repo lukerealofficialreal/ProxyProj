@@ -23,8 +23,6 @@ public class Proxy {
     public static final int PORT = 27020;
     public static final int SERVER_PORT = 27020;
 
-
-
     public static void main(String[] args) {
         //1. Clear cache from previous runs
         //2. Receive packet
@@ -45,6 +43,8 @@ public class Proxy {
             System.err.println(e.getMessage());
             System.exit(1);
         }
+
+
 
         //ProxyClient thread = new ProxyClient();
         //thread.start();
@@ -120,7 +120,8 @@ public class Proxy {
                     continue;
                 }
             } catch (IOException e) {
-                throw new RuntimeException(e);
+                //throw new RuntimeException(e);
+                continue;
             }
         }
     }
